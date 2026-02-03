@@ -1,0 +1,11 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ekyc-app
+    # Uncomment and adjust if your application needs to expose ports
+    # ports:
+    #   - "8080:8080"
+    # Uncomment to run in detached mode
+    # restart: unless-stopped

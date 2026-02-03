@@ -1,0 +1,166 @@
+# eKYC Verification Service - Cursor Rules
+
+## Project Context
+This is an eKYC (electronic Know Your Customer) Verification Service that orchestrates verification requests across 4 external microservices for financial institutions to onboard customers while complying with KYC/AML regulations.
+
+## Technical Constraints
+
+### Framework Restrictions
+- **NO application frameworks**: Do not use Spring Boot, Micronaut, Quarkus, or similar frameworks
+- Use **plain Java only** with minimal dependencies
+- Allowed dependencies: Gson (JSON), SLF4J + Logback (logging), JUnit 5 + Mockito (testing)
+
+### External Services (All Mocked)
+- Document Verification: POST /api/v1/verify-document (5s timeout, 10 req/min)
+- Biometric Service: POST /api/v1/face-match (8s timeout, 10 req/min)
+- Address Verification: POST /api/v1/verify-address (5s timeout, 10 req/min)
+- Sanctions Screening: POST /api/v1/check-sanctions (3s timeout, 10 req/min) - CRITICAL
+
+## Package Structure
+```
+com.example.ekyc/
+├── model/       # Data models and enums
+├── client/      # HTTP client and service response
+├── service/     # Service clients, decision engine, orchestrator
+├── exception/   # Custom exceptions
+└── util/        # Utilities (JSON, correlation IDs)
+```
+
+## Coding Standards
+
+### Naming Conventions
+- Classes: PascalCase (e.g., `VerificationOrchestrator`)
+- Methods/variables: camelCase (e.g., `makeDecision`, `customerId`)
+- Constants: SCREAMING_SNAKE_CASE (e.g., `MAX_RETRY_ATTEMPTS`)
+- Enums: PascalCase for type, SCREAMING_SNAKE_CASE for values
+
+### Data Models
+- Use immutable objects where possible
+- Include proper equals(), hashCode(), toString() methods
+- Use LocalDateTime for timestamps (ISO 8601 format)
+- Customer IDs format: "CUST-XXX"
+- Request IDs format: "REQ-XXXXX"
+
+### Enums Required
+```java
+Decision: APPROVED, REJECTED, MANUAL_REVIEW
+VerificationStatus: PASS, FAIL, MANUAL_REVIEW
+```
+
+## Business Rules (MUST FOLLOW)
+
+### Document Verification
+- Document must NOT be expired
+- Confidence score > 85% for PASS
+- Expired or low confidence → REJECTED or MANUAL_REVIEW
+
+### Face Match (Biometric)
+- Confidence score > 85% for PASS
+- Similarity score > 85% for PASS
+- Low scores → MANUAL_REVIEW
+
+### Address Verification
+- Proof must be dated within last 90 days
+- Confidence score > 80% for PASS
+
+### Sanctions Check (CRITICAL)
+- ANY match → REJECTED immediately
+- Service MUST succeed (cannot proceed if service fails)
+- This is the most critical check
+
+### Final Decision Logic
+- **APPROVED**: All checks PASS
+- **REJECTED**: Sanctions hit OR expired document OR critical failures
+- **MANUAL_REVIEW**: Low confidence scores OR partial failures
+
+## Error Handling
+
+### Custom Exceptions Required
+- ServiceException: Base exception for service errors
+- TimeoutException: When service call times out
+- RateLimitException: When rate limit exceeded (10 req/min)
+- ValidationException: For input validation failures
+
+### Retry Logic
+- Retry on timeout and 5xx errors only (NOT 4xx)
+- Max 3 retry attempts
+- Exponential backoff: 1s, 2s, 4s
+- Log each retry attempt
+
+## Logging Requirements
+
+### Use SLF4J with Logback
+- NEVER use System.out.println
+- Generate correlation IDs for request tracing
+- Log levels: INFO (normal flow), WARN (recoverable issues), ERROR (failures)
+- NEVER log sensitive data (PII, passwords, full document numbers)
+
+### What to Log
+- Request start/end with correlation ID
+- Each service call result
+- Decision outcomes
+- Errors with context (not stack traces in production logs)
+
+## Testing Requirements
+
+### Test Categories
+1. Unit tests for KYCDecisionEngine (all decision paths)
+2. Service client tests with mocked HTTP responses
+3. Integration tests for VerificationOrchestrator
+
+### Required Test Scenarios
+- `test_all_verifications_pass`: All PASS → APPROVED
+- `test_sanctions_hit`: Sanctions HIT → REJECTED
+- `test_low_confidence_scores`: Low confidence → MANUAL_REVIEW
+- `test_expired_document`: Expired doc → REJECTED
+- `test_retry_on_timeout`: Mock service times out twice, succeeds on 3rd attempt
+- `test_retry_on_5xx`: Retry logic works, Service returns 500 error
+- `test_retry_on_4xx`: Fail immediately, no retries
+- `test_rate_limit_enforcement`: Make 11 requests rapidly, Expected: 10 succeed, 11th blocked or queued
+
+## Code Quality Principles
+
+### Priority Order
+1. **Quality over Speed**: Better to complete less but do it well
+2. **Working code first**: Get happy path working before edge cases
+3. **Test-driven**: Write tests alongside implementation
+4. **Clean code**: Readable, maintainable, well-organized
+
+### Avoid
+- Hardcoded configuration values (use constants or config)
+- Deep nesting (max 3 levels)
+- Methods longer than 30 lines
+- Classes with too many responsibilities
+- Catching generic Exception without re-throwing
+
+## HTTP Client Design
+
+### Interface
+```java
+public interface HttpClient {
+    ServiceResponse post(String url, Object body, int timeoutSeconds);
+}
+```
+
+### Mock Implementation
+- SimpleHttpClient should simulate realistic responses
+- Support configurable success/failure scenarios for testing
+- No actual HTTP calls - everything is mocked
+
+## Service Client Pattern
+Each service client should:
+1. Build the request payload
+2. Call HTTP client with appropriate timeout
+3. Parse response JSON
+4. Apply business rules (confidence thresholds, etc.)
+5. Return VerificationResult
+6. Handle errors gracefully (return MANUAL_REVIEW on failure)
+
+## Orchestrator Pattern
+1. Accept Customer + List of verification types
+2. Generate correlation ID
+3. Call appropriate service clients
+4. Aggregate all VerificationResults
+5. Pass results to KYCDecisionEngine
+6. Return final KYCDecision
+7. Log throughout with correlation ID
